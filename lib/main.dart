@@ -1,10 +1,32 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math' show Random;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart'
+    show Supabase, SupabaseClient, AuthState, AuthException;
 
-void main() => runApp(const LibraryApp());
+// ---------------------------------------------------------------------------
+// ONLINE MODE (shared database so everyone sees the same logbook)
+// Paste your Supabase project URL and anon/publishable key between the quotes.
+// Leave them empty to keep everything on this computer only.
+// ---------------------------------------------------------------------------
+const String supabaseUrl = 'https://ulkztzzfmafslxjdxyle.supabase.co';
+const String supabaseAnonKey = 'sb_publishable_UhSSaY0YaWBk-wTT_07ebw_B1AIarJD';
+const bool useCloud = supabaseUrl != '' && supabaseAnonKey != '';
+
+SupabaseClient get cloud => Supabase.instance.client;
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (useCloud) {
+    await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  }
+  runApp(const LibraryApp());
+}
 
 // ---------------------------------------------------------------------------
 // Settings (change these if your school's rules change)
@@ -178,15 +200,55 @@ class Student {
       );
 }
 
+// A short unique id for books and log records.
+String newId(String prefix) =>
+    '$prefix${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}'
+    '${Random().nextInt(1 << 20).toRadixString(36)}';
+
+class Book {
+  final String id, title, author, bookNo;
+  final int copies;
+
+  const Book({
+    required this.id,
+    required this.title,
+    this.author = '',
+    this.bookNo = '',
+    this.copies = 1,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'author': author,
+        'bookNo': bookNo,
+        'copies': copies,
+      };
+
+  factory Book.fromJson(Map<String, dynamic> j) => Book(
+        id: j['id'] as String,
+        title: j['title'] as String,
+        author: j['author'] as String? ?? '',
+        bookNo: j['bookNo'] as String? ?? '',
+        copies: (j['copies'] as num?)?.toInt() ?? 1,
+      );
+}
+
 class LogEntry {
+  final String id;
   final Student student;
-  final String book;
+  final String book; // title at the time of borrowing
+  final String bookId; // '' for old records made before the catalog existed
+  final String bookNo;
   final DateTime time;
   DateTime? returnedAt;
 
   LogEntry({
+    required this.id,
     required this.student,
     required this.book,
+    this.bookId = '',
+    this.bookNo = '',
     required this.time,
     this.returnedAt,
   });
@@ -196,21 +258,34 @@ class LogEntry {
   bool get isOverdue => !returned && DateTime.now().isAfter(dueDate);
 
   Map<String, dynamic> toJson() => {
+        'id': id,
         'student': student.toJson(),
         'book': book,
+        'bookId': bookId,
+        'bookNo': bookNo,
         'time': time.toIso8601String(),
         'returnedAt': returnedAt?.toIso8601String(),
       };
 
-  factory LogEntry.fromJson(Map<String, dynamic> j) => LogEntry(
-        student: Student.fromJson(j['student'] as Map<String, dynamic>),
-        book: j['book'] as String,
-        time: DateTime.parse(j['time'] as String),
-        returnedAt: j['returnedAt'] == null
-            ? null
-            : DateTime.parse(j['returnedAt'] as String),
-      );
+  factory LogEntry.fromJson(Map<String, dynamic> j) {
+    final t = DateTime.parse(j['time'] as String);
+    return LogEntry(
+      id: j['id'] as String? ?? 'l${t.microsecondsSinceEpoch}',
+      student: Student.fromJson(j['student'] as Map<String, dynamic>),
+      book: j['book'] as String,
+      bookId: j['bookId'] as String? ?? '',
+      bookNo: j['bookNo'] as String? ?? '',
+      time: t,
+      returnedAt: j['returnedAt'] == null
+          ? null
+          : DateTime.parse(j['returnedAt'] as String),
+    );
+  }
 }
+
+// How many copies of a book are out right now.
+int borrowedCopies(List<LogEntry> logs, Book b) =>
+    logs.where((e) => e.bookId == b.id && !e.returned).length;
 
 String formatDateTime(DateTime d) {
   const months = [
@@ -230,6 +305,37 @@ List<Student> sampleStudents() => [
       Student(id: '${idPrefix}003', name: 'Pedro Reyes', section: 'A', grade: '11', strand: 'HUMSS'),
       Student(id: '${idPrefix}004', name: 'Ana Lopez', level: collegeLevel, college: 'College of Computer Studies', course: 'BSIT - Bachelor of Science in Information Technology'),
     ];
+
+// Sample books for offline mode only. In online mode the catalog starts empty.
+List<Book> sampleBooks() => [
+      Book(id: 'sample-1', title: 'Noli Me Tangere', author: 'Jose Rizal', bookNo: 'BK-0001', copies: 3),
+      Book(id: 'sample-2', title: 'El Filibusterismo', author: 'Jose Rizal', bookNo: 'BK-0002', copies: 2),
+      Book(id: 'sample-3', title: 'Sample Programming Book', author: 'Sample Author', bookNo: 'BK-0003', copies: 1),
+    ];
+
+// Turns pasted Excel rows (or comma-separated lines) into books.
+// Columns: Title, Author, Copies, Book number. Only the title is required.
+List<Book> parseBooks(String text) {
+  final out = <Book>[];
+  for (final line in text.split(RegExp(r'\r?\n'))) {
+    if (line.trim().isEmpty) continue;
+    final cells = (line.contains('\t') ? line.split('\t') : line.split(','))
+        .map((c) => c.trim())
+        .toList();
+    if (cells.isEmpty || cells[0].isEmpty) continue;
+    if (cells[0].toLowerCase() == 'title') continue; // header row
+    var copies = cells.length > 2 ? (int.tryParse(cells[2]) ?? 1) : 1;
+    if (copies < 1) copies = 1;
+    out.add(Book(
+      id: newId('b'),
+      title: cells[0],
+      author: cells.length > 1 ? cells[1] : '',
+      copies: copies,
+      bookNo: cells.length > 3 ? cells[3] : '',
+    ));
+  }
+  return out;
+}
 
 Future<bool> confirm(BuildContext context, String title, String message) async {
   final r = await showDialog<bool>(
@@ -252,29 +358,248 @@ Future<bool> confirm(BuildContext context, String title, String message) async {
   return r ?? false;
 }
 
+// ---------------------------------------------------------------------------
+// Reading the library ID code (barcode / QR)
+// ---------------------------------------------------------------------------
+
+// Lower-case, no symbols, "&" treated as "and" (for matching names safely).
+String _norm(String s) => s
+    .toLowerCase()
+    .replaceAll('&', 'and')
+    .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+    .trim();
+
+class ScanInfo {
+  final String raw;
+  String? id;
+  String name = '';
+  String level = ''; // shs, collegeLevel, or '' if the code does not say
+  String grade = '', section = '', strand = '', college = '', course = '';
+
+  ScanInfo(this.raw);
+
+  // The shift is never read from the code. It always follows the grade + strand rules.
+  String get shift => autoShift(grade, strand);
+
+  // A complete student, only if EVERYTHING the Add Student form needs was found
+  // and every value matches the allowed options.
+  Student? toStudent() {
+    final i = id;
+    if (i == null || name.isEmpty) return null;
+    if (level == collegeLevel) {
+      if (college.isEmpty || course.isEmpty) return null;
+      return Student(
+        id: i,
+        name: name,
+        level: collegeLevel,
+        college: college,
+        course: course,
+      );
+    }
+    if (level == shs) {
+      if (grade.isEmpty || strand.isEmpty || section.isEmpty || shift.isEmpty) {
+        return null;
+      }
+      return Student(
+        id: i,
+        name: name,
+        level: shs,
+        section: section,
+        grade: grade,
+        strand: strand,
+        shift: shift,
+      );
+    }
+    return null;
+  }
+
+  // Whatever was found, used to pre-fill the form when something is missing.
+  Student partial() => Student(
+        id: id ?? idPrefix,
+        name: name,
+        level: level.isEmpty ? shs : level,
+        section: section,
+        grade: grade,
+        strand: strand,
+        shift: shift,
+        college: college,
+        course: course,
+      );
+}
+
+// Reads the text of a scanned code. Works with:
+//  - a plain ID (HY202500001)
+//  - a web link that contains the ID, or has ?name=...&grade=... in it
+//  - JSON text such as {"id":"HY202500001","name":"..."}
+// It only keeps the details the Add Student form asks for, and only if they
+// match the allowed options. Anything else in the code is ignored.
+ScanInfo parseScan(String raw) {
+  final info = ScanInfo(raw);
+  final text = raw.trim();
+  final fields = <String, String>{};
+
+  void put(String k, dynamic v) {
+    if (v == null) return;
+    final key = k.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final val = v.toString().trim();
+    if (key.isNotEmpty && val.isNotEmpty) fields[key] = val;
+  }
+
+  // 1) JSON
+  if (text.startsWith('{')) {
+    try {
+      final j = jsonDecode(text);
+      if (j is Map) {
+        j.forEach((k, v) => put(k.toString(), v));
+      }
+    } catch (_) {}
+  }
+
+  // 2) Web link with ?name=value&name=value
+  try {
+    final uri = Uri.tryParse(text);
+    if (uri != null) {
+      uri.queryParameters.forEach((k, v) => put(k, v));
+    }
+  } catch (_) {}
+
+  // 3) Plain "key=value" or "key: value" text
+  if (fields.isEmpty && !text.contains('://')) {
+    for (final part in text.split(RegExp(r'[\n;|&]'))) {
+      final m = RegExp(r'^\s*([A-Za-z_ ]+?)\s*[=:]\s*(.+)$').firstMatch(part);
+      if (m != null) put(m.group(1)!, m.group(2)!);
+    }
+  }
+
+  String? pick(List<String> keys) {
+    for (final k in keys) {
+      final v = fields[k];
+      if (v != null) return v;
+    }
+    return null;
+  }
+
+  // ---- ID (must match HY202500 + 3 digits) ----
+  String? id;
+  final fromField =
+      pick(['id', 'studentid', 'idnumber', 'idno', 'studentno', 'studentnumber']);
+  if (fromField != null) {
+    final u = fromField.trim().toUpperCase();
+    if (isValidId(u)) id = u;
+  }
+  final idRegex = RegExp('(?<![A-Za-z0-9])$idPrefix[0-9]{3}(?![0-9])',
+      caseSensitive: false);
+  id ??= idRegex.firstMatch(text)?.group(0)?.toUpperCase();
+  info.id = id;
+  if (id == null) return info;
+
+  // ---- name ----
+  final nm = pick(['name', 'fullname', 'studentname', 'learnername']);
+  if (nm != null) {
+    final clean = nm.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (clean.isNotEmpty && clean.length <= 80) info.name = clean;
+  }
+
+  // ---- Senior High details ----
+  final g = pick(['grade', 'gradelevel', 'yearlevel']);
+  if (g != null) {
+    final m = RegExp(r'(11|12)').firstMatch(g);
+    if (m != null) info.grade = m.group(1)!;
+  }
+  final sec = pick(['section', 'sec']);
+  if (sec != null && sec.length <= 30) info.section = sec.trim();
+  final st = pick(['strand', 'track']);
+  if (st != null) {
+    final words = _norm(st).split(' ');
+    for (final x in strands) {
+      if (words.contains(_norm(x))) info.strand = x;
+    }
+  }
+
+  // ---- College details ----
+  final cl = pick(['college', 'department', 'dept', 'school']);
+  if (cl != null) {
+    for (final c in colleges) {
+      if (_norm(cl) == _norm(c)) info.college = c;
+    }
+  }
+  final cr = pick(['course', 'program', 'degree']);
+  if (cr != null) {
+    final matches = <MapEntry<String, String>>[];
+    collegeCourses.forEach((col, list) {
+      for (final c in list) {
+        final abbr = c.split(' - ').first;
+        if (_norm(cr) == _norm(c) || _norm(cr) == _norm(abbr)) {
+          matches.add(MapEntry(col, c));
+        }
+      }
+    });
+    final pool = info.college.isEmpty
+        ? matches
+        : matches.where((m) => m.key == info.college).toList();
+    // only accept it if it points to exactly one real course
+    if (pool.length == 1) {
+      info.college = pool.first.key;
+      info.course = pool.first.value;
+    }
+  }
+
+  // ---- level ----
+  final lv = pick(['level', 'type', 'studentlevel']);
+  if (lv != null) {
+    final n = _norm(lv);
+    if (n.contains('college')) {
+      info.level = collegeLevel;
+    } else if (n.contains('senior') || n == 'shs') {
+      info.level = shs;
+    }
+  }
+  if (info.level.isEmpty) {
+    if (info.college.isNotEmpty || info.course.isNotEmpty) {
+      info.level = collegeLevel;
+    } else if (info.grade.isNotEmpty ||
+        info.strand.isNotEmpty ||
+        info.section.isNotEmpty) {
+      info.level = shs;
+    }
+  }
+  // keep only the fields that belong to that level
+  if (info.level == shs) {
+    info.college = '';
+    info.course = '';
+  } else if (info.level == collegeLevel) {
+    info.grade = '';
+    info.strand = '';
+    info.section = '';
+  }
+  return info;
+}
+
 // Add / edit student dialog (Senior High or College, with ID format check)
-Future<Student?> showStudentDialog(BuildContext context, {Student? existing}) {
-  final idCtrl = TextEditingController(text: existing?.id ?? idPrefix);
-  final nameCtrl = TextEditingController(text: existing?.name ?? '');
-  final sectionCtrl = TextEditingController(text: existing?.section ?? '');
-  String level = existing?.level ?? shs;
-  String grade =
-      (existing != null && existing.grade.isNotEmpty) ? existing.grade : '11';
-  String strand = (existing != null && existing.strand.isNotEmpty)
-      ? existing.strand
-      : strands.first;
-  String shift = (existing != null && existing.shift.isNotEmpty)
-      ? existing.shift
+Future<Student?> showStudentDialog(BuildContext context,
+    {Student? existing, Student? prefill}) {
+  final base = existing ?? prefill; // starting values for the form
+  final idLocked = existing != null || prefill != null;
+  final idCtrl = TextEditingController(text: base?.id ?? idPrefix);
+  final nameCtrl = TextEditingController(text: base?.name ?? '');
+  final sectionCtrl = TextEditingController(text: base?.section ?? '');
+  String level = base?.level ?? shs;
+  String grade = base?.grade ?? '';
+  String strand = base?.strand ?? '';
+  String shift = (base != null && base.shift.isNotEmpty)
+      ? base.shift
       : autoShift(grade, strand);
-  String college = existing?.college ?? '';
-  String course = existing?.course ?? '';
+  String college = base?.college ?? '';
+  String course = base?.course ?? '';
   String? error;
 
   return showDialog<Student>(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setLocal) => AlertDialog(
-        title: Text(existing == null ? 'Add student' : 'Edit student'),
+        title: Text(existing != null
+            ? 'Edit student'
+            : (prefill != null ? 'Complete student info' : 'Add student')),
         content: SingleChildScrollView(
           child: SizedBox(
             width: 420,
@@ -282,6 +607,14 @@ Future<Student?> showStudentDialog(BuildContext context, {Student? existing}) {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (prefill != null)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'The ID code did not contain all the details. Please complete the rest.',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
                 SegmentedButton<String>(
                   segments: const [
                     ButtonSegment(value: shs, label: Text('Senior High')),
@@ -293,7 +626,7 @@ Future<Student?> showStudentDialog(BuildContext context, {Student? existing}) {
                 const SizedBox(height: 16),
                 TextField(
                   controller: idCtrl,
-                  enabled: existing == null,
+                  enabled: !idLocked,
                   textCapitalization: TextCapitalization.characters,
                   inputFormatters: [LengthLimitingTextInputFormatter(idLength)],
                   decoration: InputDecoration(
@@ -327,9 +660,10 @@ Future<Student?> showStudentDialog(BuildContext context, {Student? existing}) {
                       ButtonSegment(value: '11', label: Text('Grade 11')),
                       ButtonSegment(value: '12', label: Text('Grade 12')),
                     ],
-                    selected: {grade},
+                    emptySelectionAllowed: true,
+                    selected: grade.isEmpty ? <String>{} : {grade},
                     onSelectionChanged: (v) => setLocal(() {
-                      grade = v.first;
+                      grade = v.isEmpty ? '' : v.first;
                       shift = autoShift(grade, strand);
                     }),
                   ),
@@ -355,7 +689,7 @@ Future<Student?> showStudentDialog(BuildContext context, {Student? existing}) {
                   const SizedBox(height: 4),
                   if (allowedShifts(grade, strand).isEmpty)
                     const Text(
-                      'No shift has been set for this grade and strand yet.',
+                      'Choose a grade and strand to see the shift.',
                       style: TextStyle(color: Colors.grey),
                     )
                   else
@@ -452,6 +786,10 @@ Future<Student?> showStudentDialog(BuildContext context, {Student? existing}) {
                 setLocal(() => error = 'Please enter the section.');
                 return;
               }
+              if (level == shs && (grade.isEmpty || strand.isEmpty)) {
+                setLocal(() => error = 'Please choose the grade and strand.');
+                return;
+              }
               if (level == shs) {
                 final allowed = allowedShifts(grade, strand);
                 if (allowed.isNotEmpty && !allowed.contains(shift)) {
@@ -497,6 +835,199 @@ Future<Student?> showStudentDialog(BuildContext context, {Student? existing}) {
   );
 }
 
+// Add / edit a book in the catalog
+Future<Book?> showBookDialog(BuildContext context, {Book? existing}) {
+  final titleCtrl = TextEditingController(text: existing?.title ?? '');
+  final authorCtrl = TextEditingController(text: existing?.author ?? '');
+  final noCtrl = TextEditingController(text: existing?.bookNo ?? '');
+  final copiesCtrl = TextEditingController(text: '${existing?.copies ?? 1}');
+  String? error;
+
+  return showDialog<Book>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setLocal) => AlertDialog(
+        title: Text(existing == null ? 'Add book' : 'Edit book'),
+        content: SingleChildScrollView(
+          child: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: titleCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Title',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: authorCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Author',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: noCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Book number / barcode (optional)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: copiesCtrl,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: const InputDecoration(
+                    labelText: 'Number of copies',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                if (error != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(
+                      error!,
+                      style: TextStyle(color: Theme.of(ctx).colorScheme.error),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final title = titleCtrl.text.trim();
+              final copies = int.tryParse(copiesCtrl.text.trim());
+              if (title.isEmpty) {
+                setLocal(() => error = 'Please enter the book title.');
+                return;
+              }
+              if (copies == null || copies < 1) {
+                setLocal(() => error = 'Copies must be 1 or more.');
+                return;
+              }
+              Navigator.pop(
+                ctx,
+                Book(
+                  id: existing?.id ?? newId('b'),
+                  title: title,
+                  author: authorCtrl.text.trim(),
+                  bookNo: noCtrl.text.trim(),
+                  copies: copies,
+                ),
+              );
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+// Paste many books from Excel at once
+Future<String?> showImportDialog(BuildContext context) {
+  final ctrl = TextEditingController();
+  return showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Import books from Excel'),
+      content: SizedBox(
+        width: 520,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'In Excel, select the columns Title, Author, Copies, Book number '
+              '(one book per row), copy them, and paste below. Only the title is required.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              maxLines: 10,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: 'Title, Author, Copies, Book number',
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(ctx, ctrl.text),
+          child: const Text('Import'),
+        ),
+      ],
+    ),
+  );
+}
+
+// Who borrowed this book, and when
+void showBookHistory(BuildContext context, Book b, List<LogEntry> logs) {
+  final items = logs.where((e) => e.bookId == b.id).toList();
+  showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(b.title),
+      content: SizedBox(
+        width: 420,
+        child: items.isEmpty
+            ? const Text('Nobody has borrowed this book yet.')
+            : SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final e in items)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${e.student.name} (${e.student.id})',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            Text('Borrowed: ${formatDateTime(e.time)}'),
+                            Text(
+                              e.returned
+                                  ? 'Returned: ${formatDateTime(e.returnedAt!)}'
+                                  : 'Not yet returned (due ${formatDateTime(e.dueDate)})',
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
@@ -513,7 +1044,128 @@ class LibraryApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
         useMaterial3: true,
       ),
-      home: const HomePage(),
+      home: useCloud ? const AuthGate() : const HomePage(),
+    );
+  }
+}
+
+// Shows the login screen until a staff member signs in (online mode only).
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<AuthState>(
+      stream: cloud.auth.onAuthStateChange,
+      builder: (context, snapshot) {
+        final session = cloud.auth.currentSession;
+        return session == null ? const LoginPage() : const HomePage();
+      },
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final emailCtrl = TextEditingController();
+  final passCtrl = TextEditingController();
+  bool loading = false;
+  String? error;
+
+  @override
+  void dispose() {
+    emailCtrl.dispose();
+    passCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _signIn() async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      await cloud.auth.signInWithPassword(
+        email: emailCtrl.text.trim(),
+        password: passCtrl.text,
+      );
+    } on AuthException catch (e) {
+      if (mounted) setState(() => error = e.message);
+    } catch (e) {
+      if (mounted) setState(() => error = 'Could not sign in: $e');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 380),
+          child: Card(
+            margin: const EdgeInsets.all(16),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Icon(Icons.menu_book,
+                      size: 48, color: Theme.of(context).colorScheme.primary),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Library Logbook',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  const Text('Staff sign in', textAlign: TextAlign.center),
+                  const SizedBox(height: 24),
+                  TextField(
+                    controller: emailCtrl,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'Email',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: passCtrl,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Password',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => loading ? null : _signIn(),
+                  ),
+                  if (error != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Text(
+                        error!,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error),
+                      ),
+                    ),
+                  const SizedBox(height: 16),
+                  FilledButton(
+                    onPressed: loading ? null : _signIn,
+                    child: Text(loading ? 'Signing in...' : 'Sign in'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -527,20 +1179,38 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   List<Student> students = [];
+  List<Book> books = [];
   List<LogEntry> logs = [];
   int tab = 0;
   bool loaded = false;
+  final List<StreamSubscription<dynamic>> _subs = [];
+  final Set<String> _got = {};
 
   @override
   void initState() {
     super.initState();
-    _load();
+    if (useCloud) {
+      _startCloud();
+    } else {
+      _loadLocal();
+    }
   }
 
-  Future<void> _load() async {
+  @override
+  void dispose() {
+    for (final sub in _subs) {
+      sub.cancel();
+    }
+    super.dispose();
+  }
+
+  // ---- storage: this computer only ----
+
+  Future<void> _loadLocal() async {
     final p = await SharedPreferences.getInstance();
     final s = p.getString('students_v2');
     final l = p.getString('logs_v2');
+    final b = p.getString('books_v1');
     setState(() {
       students = s == null
           ? sampleStudents()
@@ -552,16 +1222,88 @@ class _HomePageState extends State<HomePage> {
           : (jsonDecode(l) as List)
               .map((e) => LogEntry.fromJson(e as Map<String, dynamic>))
               .toList();
+      books = b == null
+          ? sampleBooks()
+          : (jsonDecode(b) as List)
+              .map((e) => Book.fromJson(e as Map<String, dynamic>))
+              .toList();
       loaded = true;
     });
   }
 
-  Future<void> _save() async {
+  Future<void> _saveLocal() async {
     final p = await SharedPreferences.getInstance();
     await p.setString(
         'students_v2', jsonEncode(students.map((e) => e.toJson()).toList()));
     await p.setString(
         'logs_v2', jsonEncode(logs.map((e) => e.toJson()).toList()));
+    await p.setString(
+        'books_v1', jsonEncode(books.map((e) => e.toJson()).toList()));
+  }
+
+  // ---- storage: online (shared database, updates live for everyone) ----
+
+  void _startCloud() {
+    void gotFirst(String table) {
+      _got.add(table);
+      if (_got.length == 3 && !loaded && mounted) {
+        setState(() => loaded = true);
+      }
+    }
+
+    void failed(Object e, [StackTrace? st]) {
+      if (!mounted) return;
+      setState(() => loaded = true);
+      _snack('Online connection problem: $e');
+    }
+
+    Map<String, dynamic> dataOf(Map<String, dynamic> row) =>
+        Map<String, dynamic>.from(row['data'] as Map);
+
+    _subs.add(cloud.from('students').stream(primaryKey: ['id']).listen((rows) {
+      if (!mounted) return;
+      setState(() {
+        students = rows.map((r) => Student.fromJson(dataOf(r))).toList()
+          ..sort((a, b) => a.id.compareTo(b.id));
+      });
+      gotFirst('students');
+    }, onError: failed));
+
+    _subs.add(cloud.from('books').stream(primaryKey: ['id']).listen((rows) {
+      if (!mounted) return;
+      setState(() {
+        books = rows.map((r) => Book.fromJson(dataOf(r))).toList()
+          ..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+      });
+      gotFirst('books');
+    }, onError: failed));
+
+    _subs.add(cloud.from('logs').stream(primaryKey: ['id']).listen((rows) {
+      if (!mounted) return;
+      setState(() {
+        logs = rows.map((r) => LogEntry.fromJson(dataOf(r))).toList()
+          ..sort((a, b) => b.time.compareTo(a.time));
+      });
+      gotFirst('logs');
+    }, onError: failed));
+  }
+
+  // Saves one record (or deletes it when data is null).
+  Future<void> _persist(
+      String table, String id, Map<String, dynamic>? data) async {
+    if (!useCloud) {
+      await _saveLocal();
+      return;
+    }
+    try {
+      if (data == null) {
+        await cloud.from(table).delete().eq('id', id);
+      } else {
+        await cloud.from(table).upsert({'id': id, 'data': data});
+      }
+    } catch (e) {
+      if (mounted) _snack('Could not save online: $e');
+    }
   }
 
   void _snack(String msg) {
@@ -570,17 +1312,23 @@ class _HomePageState extends State<HomePage> {
 
   // ---- logs ----
 
-  void _addLog(Student s, String book) {
-    setState(() {
-      logs.insert(0, LogEntry(student: s, book: book, time: DateTime.now()));
-    });
-    _save();
-    _snack('Logged: ${s.name} borrowed "$book"');
+  void _addLog(Student s, Book b) {
+    final entry = LogEntry(
+      id: newId('l'),
+      student: s,
+      book: b.title,
+      bookId: b.id,
+      bookNo: b.bookNo,
+      time: DateTime.now(),
+    );
+    setState(() => logs.insert(0, entry));
+    _persist('logs', entry.id, entry.toJson());
+    _snack('Logged: ${s.name} borrowed "${b.title}"');
   }
 
   void _toggleReturned(LogEntry e, bool value) {
     setState(() => e.returnedAt = value ? DateTime.now() : null);
-    _save();
+    _persist('logs', e.id, e.toJson());
   }
 
   Future<void> _deleteLog(LogEntry e) async {
@@ -588,20 +1336,25 @@ class _HomePageState extends State<HomePage> {
         context, 'Delete record?', '"${e.book}" borrowed by ${e.student.name}');
     if (!ok || !mounted) return;
     setState(() => logs.remove(e));
-    _save();
+    _persist('logs', e.id, null);
   }
 
   // ---- students ----
 
+  bool _registerStudent(Student s) {
+    if (students.any((x) => x.id == s.id)) return false;
+    setState(() => students.add(s));
+    _persist('students', s.id, s.toJson());
+    return true;
+  }
+
   Future<void> _addStudent() async {
     final result = await showStudentDialog(context);
     if (result == null || !mounted) return;
-    if (students.any((s) => s.id == result.id)) {
+    if (!_registerStudent(result)) {
       _snack('That Student ID already exists.');
       return;
     }
-    setState(() => students.add(result));
-    _save();
     _snack('Added ${result.name}');
   }
 
@@ -612,7 +1365,7 @@ class _HomePageState extends State<HomePage> {
       final i = students.indexWhere((s) => s.id == old.id);
       if (i != -1) students[i] = result;
     });
-    _save();
+    _persist('students', result.id, result.toJson());
   }
 
   Future<void> _deleteStudent(Student s) async {
@@ -620,7 +1373,69 @@ class _HomePageState extends State<HomePage> {
         '${s.name} (${s.id}) will be removed. Their past records stay in the logbook.');
     if (!ok || !mounted) return;
     setState(() => students.removeWhere((x) => x.id == s.id));
-    _save();
+    _persist('students', s.id, null);
+  }
+
+  // ---- books ----
+
+  Future<void> _addBook() async {
+    final result = await showBookDialog(context);
+    if (result == null || !mounted) return;
+    setState(() => books.add(result));
+    _persist('books', result.id, result.toJson());
+    _snack('Added "${result.title}"');
+  }
+
+  Future<void> _editBook(Book old) async {
+    final result = await showBookDialog(context, existing: old);
+    if (result == null || !mounted) return;
+    setState(() {
+      final i = books.indexWhere((b) => b.id == old.id);
+      if (i != -1) books[i] = result;
+    });
+    _persist('books', result.id, result.toJson());
+  }
+
+  Future<void> _deleteBook(Book b) async {
+    final ok = await confirm(context, 'Delete book?',
+        '"${b.title}" will be removed from the catalog. Past records stay in the logbook.');
+    if (!ok || !mounted) return;
+    setState(() => books.removeWhere((x) => x.id == b.id));
+    _persist('books', b.id, null);
+  }
+
+  Future<void> _importBooks() async {
+    final text = await showImportDialog(context);
+    if (text == null || !mounted) return;
+    final parsed = parseBooks(text);
+    final fresh = <Book>[];
+    var skipped = 0;
+    for (final b in parsed) {
+      final dup = [...books, ...fresh].any((x) =>
+          x.title.toLowerCase() == b.title.toLowerCase() &&
+          x.author.toLowerCase() == b.author.toLowerCase());
+      if (dup) {
+        skipped++;
+      } else {
+        fresh.add(b);
+      }
+    }
+    if (fresh.isNotEmpty) {
+      setState(() => books.addAll(fresh));
+      if (useCloud) {
+        try {
+          await cloud.from('books').upsert(
+              fresh.map((b) => {'id': b.id, 'data': b.toJson()}).toList());
+        } catch (e) {
+          if (mounted) _snack('Could not save online: $e');
+        }
+      } else {
+        await _saveLocal();
+      }
+    }
+    if (!mounted) return;
+    _snack(
+        'Imported ${fresh.length} book(s)${skipped > 0 ? ', skipped $skipped duplicate(s)' : ''}.');
   }
 
   @override
@@ -630,7 +1445,13 @@ class _HomePageState extends State<HomePage> {
     }
 
     final pages = [
-      BorrowTab(students: students, logs: logs, onLog: _addLog),
+      BorrowTab(
+        students: students,
+        books: books,
+        logs: logs,
+        onLog: _addLog,
+        onRegister: _registerStudent,
+      ),
       LogbookTab(
         logs: logs,
         onReturned: _toggleReturned,
@@ -642,12 +1463,36 @@ class _HomePageState extends State<HomePage> {
         onEdit: _editStudent,
         onDelete: _deleteStudent,
       ),
+      BooksTab(
+        books: books,
+        logs: logs,
+        onEdit: _editBook,
+        onDelete: _deleteBook,
+        onImport: _importBooks,
+      ),
     ];
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Library Logbook'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Center(
+              child: Text(
+                useCloud ? 'Online' : 'This computer only',
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+          ),
+          if (useCloud)
+            IconButton(
+              tooltip: 'Sign out (${cloud.auth.currentUser?.email ?? ''})',
+              icon: const Icon(Icons.logout),
+              onPressed: () => cloud.auth.signOut(),
+            ),
+        ],
       ),
       body: pages[tab],
       floatingActionButton: tab == 2
@@ -656,7 +1501,13 @@ class _HomePageState extends State<HomePage> {
               icon: const Icon(Icons.person_add),
               label: const Text('Add student'),
             )
-          : null,
+          : tab == 3
+              ? FloatingActionButton.extended(
+                  onPressed: _addBook,
+                  icon: const Icon(Icons.library_add),
+                  label: const Text('Add book'),
+                )
+              : null,
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
@@ -664,6 +1515,7 @@ class _HomePageState extends State<HomePage> {
           NavigationDestination(icon: Icon(Icons.edit_note), label: 'Borrow'),
           NavigationDestination(icon: Icon(Icons.menu_book), label: 'Logbook'),
           NavigationDestination(icon: Icon(Icons.people), label: 'Students'),
+          NavigationDestination(icon: Icon(Icons.library_books), label: 'Books'),
         ],
       ),
     );
@@ -698,14 +1550,18 @@ Widget statCard(BuildContext context, String label, int value, {Color? color}) {
 
 class BorrowTab extends StatefulWidget {
   final List<Student> students;
+  final List<Book> books;
   final List<LogEntry> logs;
-  final void Function(Student, String) onLog;
+  final void Function(Student, Book) onLog;
+  final bool Function(Student) onRegister;
 
   const BorrowTab({
     super.key,
     required this.students,
+    required this.books,
     required this.logs,
     required this.onLog,
+    required this.onRegister,
   });
 
   @override
@@ -718,13 +1574,37 @@ class _BorrowTabState extends State<BorrowTab> {
   final idFocus = FocusNode();
   final bookFocus = FocusNode();
 
-  String get typedId => idCtrl.text.trim().toUpperCase();
+  String? scanMessage; // result of the last scan or the last action
+  bool scanWarning = false;
+  String? lastRaw; // text of the last scanned code (for troubleshooting)
+  Book? selectedBook;
+  String? visitId; // the student whose books are listed below
+  List<String> visitBooks = [];
+
+  String get typedText => idCtrl.text.trim();
+  String? get typedId => parseScan(typedText).id;
 
   Student? get found {
     final id = typedId;
-    if (!isValidId(id)) return null;
+    if (id == null) return null;
     for (final s in widget.students) {
       if (s.id == id) return s;
+    }
+    return null;
+  }
+
+  // The catalog book matching what was picked, typed, or scanned
+  // (by exact title or book number).
+  Book? get chosenBook {
+    final t = bookCtrl.text.trim().toLowerCase();
+    if (t.isEmpty) return null;
+    final sel = selectedBook;
+    if (sel != null && sel.title.toLowerCase() == t) return sel;
+    for (final b in widget.books) {
+      if (b.title.toLowerCase() == t ||
+          (b.bookNo.isNotEmpty && b.bookNo.toLowerCase() == t)) {
+        return b;
+      }
     }
     return null;
   }
@@ -738,32 +1618,153 @@ class _BorrowTabState extends State<BorrowTab> {
     super.dispose();
   }
 
+  // Called when a code is scanned (camera or USB scanner) or Enter is pressed.
+  Future<void> _processRaw(String raw) async {
+    final text = raw.trim();
+    if (text.isEmpty) return;
+    final scan = parseScan(text);
+    lastRaw = text;
+
+    // 1) not a valid library ID code
+    if (scan.id == null) {
+      setState(() {
+        scanWarning = true;
+        scanMessage =
+            'This code does not contain a valid student ID ($idPrefix + 3 digits).';
+      });
+      idFocus.requestFocus();
+      return;
+    }
+
+    final id = scan.id!;
+    idCtrl.text = id;
+
+    // 2) already registered: just use the saved info
+    if (widget.students.any((s) => s.id == id)) {
+      setState(() {
+        scanWarning = false;
+        scanMessage = null;
+      });
+      bookFocus.requestFocus();
+      return;
+    }
+
+    // 3) new student and the code had everything: register automatically
+    final complete = scan.toStudent();
+    if (complete != null) {
+      widget.onRegister(complete);
+      setState(() {
+        scanWarning = false;
+        scanMessage =
+            'New student registered from the ID code: ${complete.name}.';
+      });
+      bookFocus.requestFocus();
+      return;
+    }
+
+    // 4) new student but details are missing: ask only for the rest
+    setState(() {
+      scanWarning = true;
+      scanMessage =
+          'This ID is not registered yet, and the code did not have all the details.';
+    });
+    final result = await showStudentDialog(context, prefill: scan.partial());
+    if (result != null && mounted) {
+      widget.onRegister(result);
+      setState(() {
+        scanWarning = false;
+        scanMessage = 'Student registered: ${result.name}.';
+      });
+      bookFocus.requestFocus();
+    }
+  }
+
+  Future<void> _scanCamera() async {
+    final raw = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const ScanPage()),
+    );
+    if (raw != null && mounted) {
+      await _processRaw(raw);
+    }
+  }
+
+  // Logs one book. The student stays selected so more books can be added.
   void _submit() {
     final s = found;
-    final book = bookCtrl.text.trim();
-    if (s == null || book.isEmpty) return;
-    widget.onLog(s, book);
-    idCtrl.clear();
-    bookCtrl.clear();
-    setState(() {});
+    final b = chosenBook;
+    if (s == null) return;
+    if (b == null) {
+      if (bookCtrl.text.trim().isNotEmpty) {
+        setState(() {
+          scanWarning = true;
+          scanMessage =
+              'Pick the book from the list, or scan its barcode / book number.';
+        });
+      }
+      return;
+    }
+    if (borrowedCopies(widget.logs, b) >= b.copies) {
+      setState(() {
+        scanWarning = true;
+        scanMessage = 'No copies of "${b.title}" are available right now.';
+      });
+      return;
+    }
+    if (widget.logs.any(
+        (e) => !e.returned && e.student.id == s.id && e.bookId == b.id)) {
+      setState(() {
+        scanWarning = true;
+        scanMessage = '${s.name} is already borrowing "${b.title}".';
+      });
+      return;
+    }
+    widget.onLog(s, b);
+    setState(() {
+      if (visitId != s.id) {
+        visitId = s.id;
+        visitBooks = [];
+      }
+      visitBooks.add(b.title);
+      bookCtrl.clear();
+      selectedBook = null;
+      scanMessage = null;
+      scanWarning = false;
+      lastRaw = null;
+    });
+    bookFocus.requestFocus();
+  }
+
+  void _nextStudent() {
+    setState(() {
+      idCtrl.clear();
+      bookCtrl.clear();
+      selectedBook = null;
+      visitId = null;
+      visitBooks = [];
+      scanMessage = null;
+      scanWarning = false;
+      lastRaw = null;
+    });
     idFocus.requestFocus();
   }
 
   @override
   Widget build(BuildContext context) {
     final s = found;
-    final id = typedId;
+    final text = typedText;
+    final parsedId = typedId;
     final scheme = Theme.of(context).colorScheme;
-    final canLog = s != null && bookCtrl.text.trim().isNotEmpty;
+    final book = chosenBook;
+    final canLog = s != null && book != null;
 
     final borrowedNow = widget.logs.where((e) => !e.returned).length;
     final overdue = widget.logs.where((e) => e.isOverdue).length;
 
     String? problem;
-    if (id.length >= idLength && !isValidId(id)) {
+    if (parsedId == null && text.length >= idLength) {
       problem = 'Invalid ID. It must look like ${idPrefix}001.';
-    } else if (isValidId(id) && s == null) {
-      problem = 'No student found with this ID. Add them in the Students tab.';
+    } else if (parsedId != null && s == null && scanMessage == null) {
+      problem = 'This ID is not registered yet. Press Enter to register it.';
     }
 
     return ListView(
@@ -778,34 +1779,41 @@ class _BorrowTabState extends State<BorrowTab> {
           ],
         ),
         const SizedBox(height: 8),
-        Text('Log a borrowed book',
+        Text('Log borrowed books',
             style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 4),
         const Text(
-            'Scan the library ID (or type the ID number), then enter the book.'),
+            'Scan the library ID with the camera or a barcode scanner. Then add as many books as needed.'),
         const SizedBox(height: 16),
         TextField(
           controller: idCtrl,
           focusNode: idFocus,
           autofocus: true,
-          textCapitalization: TextCapitalization.characters,
-          inputFormatters: [LengthLimitingTextInputFormatter(idLength)],
           decoration: InputDecoration(
             labelText: 'Student ID',
-            helperText: 'Format: $idPrefix + 3 digits',
+            helperText: 'Scan the ID, or type $idPrefix + 3 digits and press Enter',
             prefixIcon: const Icon(Icons.qr_code_scanner),
+            suffixIcon: IconButton(
+              tooltip: 'Scan with camera',
+              icon: const Icon(Icons.photo_camera),
+              onPressed: _scanCamera,
+            ),
             border: const OutlineInputBorder(),
           ),
           onChanged: (_) => setState(() {}),
-          onSubmitted: (_) {
-            if (found != null) {
-              bookFocus.requestFocus();
-            } else {
-              idFocus.requestFocus();
-            }
-          },
+          onSubmitted: (v) => _processRaw(v),
         ),
         const SizedBox(height: 12),
+        if (scanMessage != null)
+          Card(
+            color: scanWarning
+                ? scheme.errorContainer
+                : scheme.secondaryContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(scanMessage!),
+            ),
+          ),
         if (problem != null)
           Card(
             color: scheme.errorContainer,
@@ -824,8 +1832,7 @@ class _BorrowTabState extends State<BorrowTab> {
                 children: [
                   Text(s.name, style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 4),
-                  Text(
-                      s.details),
+                  Text(s.details),
                   const SizedBox(height: 4),
                   Text(
                     'Currently borrowing: '
@@ -835,30 +1842,198 @@ class _BorrowTabState extends State<BorrowTab> {
               ),
             ),
           ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: bookCtrl,
-          focusNode: bookFocus,
-          decoration: const InputDecoration(
-            labelText: 'Book title',
-            prefixIcon: Icon(Icons.book),
-            border: OutlineInputBorder(),
+        if (s != null && visitId == s.id && visitBooks.isNotEmpty)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Logged just now for ${s.name} (${visitBooks.length})',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 4),
+                  for (final t in visitBooks) Text('•  $t'),
+                ],
+              ),
+            ),
           ),
-          onChanged: (_) => setState(() {}),
-          onSubmitted: (_) => _submit(),
+        if (lastRaw != null)
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            title: const Text('Show what the last scanned code says'),
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: SelectableText(lastRaw!),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        const SizedBox(height: 12),
+        if (widget.books.isEmpty)
+          Card(
+            color: scheme.errorContainer,
+            child: const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                  'The book catalog is empty. Add books in the Books tab first.'),
+            ),
+          ),
+        RawAutocomplete<Book>(
+          textEditingController: bookCtrl,
+          focusNode: bookFocus,
+          displayStringForOption: (b) => b.title,
+          optionsBuilder: (TextEditingValue v) {
+            final q = v.text.trim().toLowerCase();
+            final list = q.isEmpty
+                ? widget.books
+                : widget.books.where((b) =>
+                    b.title.toLowerCase().contains(q) ||
+                    b.author.toLowerCase().contains(q) ||
+                    b.bookNo.toLowerCase().contains(q));
+            return list.take(8);
+          },
+          onSelected: (b) => setState(() => selectedBook = b),
+          fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+            return TextField(
+              controller: controller,
+              focusNode: focusNode,
+              decoration: const InputDecoration(
+                labelText: 'Book (search by title, author, or scan the book number)',
+                prefixIcon: Icon(Icons.book),
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (_) => setState(() => selectedBook = null),
+              onSubmitted: (_) => _submit(),
+            );
+          },
+          optionsViewBuilder: (context, onSelected, options) {
+            return Align(
+              alignment: Alignment.topLeft,
+              child: Material(
+                elevation: 4,
+                child: ConstrainedBox(
+                  constraints:
+                      const BoxConstraints(maxHeight: 260, maxWidth: 600),
+                  child: ListView.builder(
+                    padding: EdgeInsets.zero,
+                    shrinkWrap: true,
+                    itemCount: options.length,
+                    itemBuilder: (context, i) {
+                      final b = options.elementAt(i);
+                      final avail = b.copies - borrowedCopies(widget.logs, b);
+                      return ListTile(
+                        dense: true,
+                        title: Text(b.title),
+                        subtitle: Text(
+                            '${b.author.isEmpty ? 'Unknown author' : b.author}  •  Available: $avail of ${b.copies}'),
+                        onTap: () => onSelected(b),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            );
+          },
         ),
+        if (book != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              'Available: ${book.copies - borrowedCopies(widget.logs, book)} of ${book.copies}'
+              '${book.bookNo.isEmpty ? '' : '  •  Book no. ${book.bookNo}'}',
+              style: const TextStyle(color: Colors.grey),
+            ),
+          ),
         const SizedBox(height: 16),
-        FilledButton.icon(
-          onPressed: canLog ? _submit : null,
-          icon: const Icon(Icons.check),
-          label: const Text('Log it'),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: canLog ? _submit : null,
+                icon: const Icon(Icons.check),
+                label: const Text('Log this book'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _nextStudent,
+                icon: const Icon(Icons.navigate_next),
+                label: const Text('Next student'),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 8),
         Text(
-          'Date and time are saved automatically. Books are due after $loanDays days.',
+          'The student stays selected after each book, so you can log several books in a row. '
+          'Press "Next student" when done. Date and time are saved automatically. '
+          'Books are due after $loanDays days.',
           style: const TextStyle(color: Colors.grey),
         ),
       ],
+    );
+  }
+}
+
+// Full-screen camera that reads one barcode / QR code and returns its text.
+class ScanPage extends StatefulWidget {
+  const ScanPage({super.key});
+
+  @override
+  State<ScanPage> createState() => _ScanPageState();
+}
+
+class _ScanPageState extends State<ScanPage> {
+  final MobileScannerController controller = MobileScannerController();
+  bool done = false;
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan library ID')),
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: controller,
+            onDetect: (capture) {
+              if (done) return;
+              for (final b in capture.barcodes) {
+                final v = b.rawValue;
+                if (v != null && v.isNotEmpty) {
+                  done = true;
+                  Navigator.of(context).pop(v);
+                  return;
+                }
+              }
+            },
+          ),
+          const Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text(
+                'Point the camera at the barcode or QR code on the ID',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  backgroundColor: Colors.black54,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -905,7 +2080,7 @@ class _LogbookTabState extends State<LogbookTab> {
   Future<void> _copyCsv(List<LogEntry> items) async {
     String q(String s) => '"${s.replaceAll('"', '""')}"';
     final rows = <String>[
-      'Student ID,Name,Level,Grade,Strand,Section,Shift,College,Course,Book,Borrowed,Returned,Status'
+      'Student ID,Name,Level,Grade,Strand,Section,Shift,College,Course,Book,Book No.,Borrowed,Returned,Status'
     ];
     for (final e in items) {
       rows.add([
@@ -919,6 +2094,7 @@ class _LogbookTabState extends State<LogbookTab> {
         q(e.student.college),
         q(e.student.course),
         q(e.book),
+        q(e.bookNo),
         q(formatDateTime(e.time)),
         q(e.returnedAt == null ? '' : formatDateTime(e.returnedAt!)),
         q(e.returned ? 'Returned' : (e.isOverdue ? 'Overdue' : 'Borrowed')),
@@ -934,6 +2110,7 @@ class _LogbookTabState extends State<LogbookTab> {
     final q = query.toLowerCase();
     final shown = widget.logs.where((e) {
       final matchText = e.book.toLowerCase().contains(q) ||
+          e.bookNo.toLowerCase().contains(q) ||
           e.student.name.toLowerCase().contains(q) ||
           e.student.id.toLowerCase().contains(q);
       return matchText && _matchStatus(e);
@@ -1017,6 +2194,7 @@ class _LogbookTabState extends State<LogbookTab> {
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            if (e.bookNo.isNotEmpty) Text('Book no. ${e.bookNo}'),
                             Text(e.student.name),
                             Text(
                                 '${e.student.id}  •  ${e.student.details}'),
@@ -1150,6 +2328,112 @@ class _StudentsTabState extends State<StudentsTab> {
                             tooltip: 'Delete',
                             icon: const Icon(Icons.delete_outline),
                             onPressed: () => widget.onDelete(s),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tab 4: Books (the catalog)
+// ---------------------------------------------------------------------------
+
+class BooksTab extends StatefulWidget {
+  final List<Book> books;
+  final List<LogEntry> logs;
+  final void Function(Book) onEdit;
+  final void Function(Book) onDelete;
+  final VoidCallback onImport;
+
+  const BooksTab({
+    super.key,
+    required this.books,
+    required this.logs,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onImport,
+  });
+
+  @override
+  State<BooksTab> createState() => _BooksTabState();
+}
+
+class _BooksTabState extends State<BooksTab> {
+  String query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final q = query.toLowerCase();
+    final shown = widget.books.where((b) {
+      return b.title.toLowerCase().contains(q) ||
+          b.author.toLowerCase().contains(q) ||
+          b.bookNo.toLowerCase().contains(q);
+    }).toList();
+    final scheme = Theme.of(context).colorScheme;
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  decoration: InputDecoration(
+                    hintText: 'Search ${widget.books.length} book(s)',
+                    prefixIcon: const Icon(Icons.search),
+                    border: const OutlineInputBorder(),
+                  ),
+                  onChanged: (v) => setState(() => query = v),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                tooltip: 'Import books from Excel (paste)',
+                onPressed: widget.onImport,
+                icon: const Icon(Icons.upload_file),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: shown.isEmpty
+              ? const Center(child: Text('No books yet. Add one or import from Excel.'))
+              : ListView.builder(
+                  padding: const EdgeInsets.only(bottom: 88),
+                  itemCount: shown.length,
+                  itemBuilder: (context, i) {
+                    final b = shown[i];
+                    final avail = b.copies - borrowedCopies(widget.logs, b);
+                    return ListTile(
+                      onTap: () => showBookHistory(context, b, widget.logs),
+                      leading: const CircleAvatar(child: Icon(Icons.book)),
+                      title: Text(b.title),
+                      subtitle: Text(
+                        '${b.author.isEmpty ? 'Unknown author' : b.author}'
+                        '${b.bookNo.isEmpty ? '' : '  •  ${b.bookNo}'}\n'
+                        'Available: $avail of ${b.copies}  •  tap to see who borrowed it',
+                        style: TextStyle(color: avail <= 0 ? scheme.error : null),
+                      ),
+                      isThreeLine: true,
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Edit',
+                            icon: const Icon(Icons.edit),
+                            onPressed: () => widget.onEdit(b),
+                          ),
+                          IconButton(
+                            tooltip: 'Delete',
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () => widget.onDelete(b),
                           ),
                         ],
                       ),
