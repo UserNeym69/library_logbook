@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'search.dart';
-import 'extras.dart';
 import 'settings.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -1605,8 +1604,8 @@ Widget statCard(BuildContext context, String label, int value, {Color? color}) {
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Column(
           children: [
-            CountUp(
-              value: value,
+            Text(
+              '$value',
               style: Theme.of(context)
                   .textTheme
                   .headlineSmall
@@ -1842,7 +1841,7 @@ class _BorrowTabState extends State<BorrowTab> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        const HeroBanner().animate().fadeIn(duration: 300.ms).slideY(begin: .05, end: 0, duration: 300.ms, curve: Curves.easeOut),
+        const HeroBanner(),
         const SizedBox(height: 12),
         Row(
           children: [
@@ -2132,20 +2131,6 @@ class LogbookTab extends StatefulWidget {
 class _LogbookTabState extends State<LogbookTab> {
   String query = '';
   String status = 'All';
-  bool searching = false;
-  Timer? _timer;
-
-  void _onSearch(String v) {
-    setState(() {
-      query = v;
-      searching = v.trim().isNotEmpty;
-    });
-    _timer?.cancel();
-    _timer = Timer(const Duration(milliseconds: 350), () {
-      if (mounted) setState(() => searching = false);
-    });
-  }
-
 
   bool _matchStatus(LogEntry e) {
     switch (status) {
@@ -2211,7 +2196,7 @@ class _LogbookTabState extends State<LogbookTab> {
                   suggestions: [
                     for (final e in widget.logs) ...[e.book, e.student.name]
                   ],
-                  onChanged: _onSearch,
+                  onChanged: (v) => setState(() => query = v),
                 ),
               ),
               const SizedBox(width: 8),
@@ -2241,9 +2226,7 @@ class _LogbookTabState extends State<LogbookTab> {
           ),
         ),
         Expanded(
-          child: searching
-              ? const FakeList()
-              : shown.isEmpty
+          child: shown.isEmpty
               ? EmptyState(
                   icon: Icons.menu_book_outlined,
                   title: query.isEmpty ? 'No records yet' : 'No matches found',
@@ -2311,7 +2294,7 @@ class _LogbookTabState extends State<LogbookTab> {
                           ],
                         ),
                       ),
-                    ).animate(delay: (30 * (i % 10)).ms).fadeIn(duration: 220.ms).slideY(begin: .04, end: 0, duration: 220.ms, curve: Curves.easeOut);
+                    ).animate().fadeIn(duration: 200.ms);
                   },
                 ),
         ),
@@ -2350,20 +2333,6 @@ class StudentsTab extends StatefulWidget {
 class _StudentsTabState extends State<StudentsTab> {
   String query = '';
   String levelFilter = 'All';
-  bool searching = false;
-  Timer? _timer;
-
-  void _onSearch(String v) {
-    setState(() {
-      query = v;
-      searching = v.trim().isNotEmpty;
-    });
-    _timer?.cancel();
-    _timer = Timer(const Duration(milliseconds: 350), () {
-      if (mounted) setState(() => searching = false);
-    });
-  }
-
 
   @override
   Widget build(BuildContext context) {
@@ -2392,7 +2361,7 @@ class _StudentsTabState extends State<StudentsTab> {
           child: SmartSearch(
             hint: 'Search by name or student ID',
             suggestions: [for (final s in widget.students) s.name],
-            onChanged: _onSearch,
+            onChanged: (v) => setState(() => query = v),
           ),
         ),
         SingleChildScrollView(
@@ -2413,9 +2382,7 @@ class _StudentsTabState extends State<StudentsTab> {
           ),
         ),
         Expanded(
-          child: searching
-              ? const FakeList()
-              : shown.isEmpty
+          child: shown.isEmpty
               ? EmptyState(
                   icon: Icons.people_outline,
                   title: query.isEmpty ? 'No students yet' : 'No matches found',
@@ -2471,7 +2438,7 @@ class _StudentsTabState extends State<StudentsTab> {
                           ),
                         tile,
                       ],
-                    ).animate(delay: (30 * (i % 10)).ms).fadeIn(duration: 220.ms).slideY(begin: .04, end: 0, duration: 220.ms, curve: Curves.easeOut);
+                    ).animate().fadeIn(duration: 200.ms);
                   },
                 ),
         ),
@@ -2504,19 +2471,6 @@ class BooksTab extends StatefulWidget {
 
 class _BooksTabState extends State<BooksTab> {
   String query = '';
-  bool searching = false;
-  Timer? _timer;
-
-  void _onSearch(String v) {
-    setState(() {
-      query = v;
-      searching = v.trim().isNotEmpty;
-    });
-    _timer?.cancel();
-    _timer = Timer(const Duration(milliseconds: 350), () {
-      if (mounted) setState(() => searching = false);
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -2536,7 +2490,7 @@ class _BooksTabState extends State<BooksTab> {
                 child: SmartSearch(
                   hint: 'Search by title, author, or book number',
                   suggestions: [for (final b in widget.books) b.title],
-                  onChanged: _onSearch,
+                  onChanged: (v) => setState(() => query = v),
                 ),
               ),
               const SizedBox(width: 8),
@@ -2549,9 +2503,7 @@ class _BooksTabState extends State<BooksTab> {
           ),
         ),
         Expanded(
-          child: searching
-              ? const FakeList()
-              : shown.isEmpty
+          child: shown.isEmpty
               ? EmptyState(
                   icon: Icons.library_books_outlined,
                   title: query.isEmpty ? 'No books yet' : 'No matches found',

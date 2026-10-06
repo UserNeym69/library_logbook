@@ -6,8 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'search.dart';
-import 'extras.dart';
-import 'settings.dart';
 import 'theme.dart';
 import 'widgets.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -31,7 +29,6 @@ Future<void> main() async {
   if (useCloud) {
     await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
   }
-  await appSettings.load();
   runApp(const LibraryApp());
 }
 
@@ -349,19 +346,15 @@ Future<bool> confirm(BuildContext context, String title, String message) async {
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text(title),
-      content: Text('$message\n\nThis cannot be undone.'),
+      content: Text(message),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(ctx, false),
           child: const Text('Cancel'),
         ),
         FilledButton(
-          style: FilledButton.styleFrom(
-            backgroundColor: danger,
-            foregroundColor: Colors.white,
-          ),
           onPressed: () => Navigator.pop(ctx, true),
-          child: const Text('Yes, delete'),
+          child: const Text('Delete'),
         ),
       ],
     ),
@@ -1048,23 +1041,11 @@ class LibraryApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: appSettings,
-      builder: (context, _) => MaterialApp(
+    return MaterialApp(
       title: 'Library Logbook',
       debugShowCheckedModeBanner: false,
       theme: icctTheme(),
-      darkTheme: icctDarkTheme(),
-      themeMode: appSettings.themeMode,
-      builder: (context, child) => Stack(
-        fit: StackFit.expand,
-        children: [
-          const AppBackdrop(),
-          if (child != null) child,
-        ],
-      ),
       home: useCloud ? const AuthGate() : const HomePage(),
-      ),
     );
   }
 }
@@ -1147,7 +1128,7 @@ class _LoginPageState extends State<LoginPage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Center(child: ClipOval(child: safeImage(logoAsset, height: 72))),
+                  Center(child: ClipOval(child: Image.asset(logoAsset, height: 72))),
                   const SizedBox(height: 8),
                   Text(
                     'Library Logbook',
@@ -1212,40 +1193,12 @@ class _HomePageState extends State<HomePage> {
   List<LogEntry> logs = [];
   int tab = 0;
   bool loaded = false;
-  bool splashDone = false;
-  bool tabLoading = false;
-  String? loadError;
   final List<StreamSubscription<dynamic>> _subs = [];
   final Set<String> _got = {};
 
   @override
   void initState() {
     super.initState();
-    appSettings.addListener(_onSettings);
-    Future.delayed(const Duration(milliseconds: 1200), () {
-      if (mounted) setState(() => splashDone = true);
-    });
-    if (useCloud) {
-      _startCloud();
-    } else {
-      _loadLocal();
-    }
-  }
-
-  void _onSettings() {
-    if (mounted) setState(() {});
-  }
-
-  void _retry() {
-    for (final sub in _subs) {
-      sub.cancel();
-    }
-    _subs.clear();
-    _got.clear();
-    setState(() {
-      loadError = null;
-      loaded = false;
-    });
     if (useCloud) {
       _startCloud();
     } else {
@@ -1255,7 +1208,6 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
-    appSettings.removeListener(_onSettings);
     for (final sub in _subs) {
       sub.cancel();
     }
@@ -1311,15 +1263,8 @@ class _HomePageState extends State<HomePage> {
 
     void failed(Object e, [StackTrace? st]) {
       if (!mounted) return;
-      final empty = students.isEmpty && books.isEmpty && logs.isEmpty;
-      setState(() {
-        loaded = true;
-        if (empty) {
-          loadError =
-              'We could not reach the online logbook. Check your internet and try again.';
-        }
-      });
-      if (!empty) _snack('Online connection problem. Showing the last saved data.');
+      setState(() => loaded = true);
+      _snack('Online connection problem: $e');
     }
 
     Map<String, dynamic> dataOf(Map<String, dynamic> row) =>
@@ -1505,13 +1450,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    if (!loaded || !splashDone) return const LoadingScreen();
-    if (loadError != null) {
-      return Scaffold(
-        appBar: AppBar(title: const BrandTitle()),
-        body: ErrorState(message: loadError!, onRetry: _retry),
-      );
-    }
+    if (!loaded) return const LoadingScreen();
 
     final pages = [
       BorrowTab(
@@ -1542,7 +1481,6 @@ class _HomePageState extends State<HomePage> {
     ];
 
     return Scaffold(
-      drawer: const AppDrawer(),
       appBar: AppBar(
         title: const BrandTitle(),
         actions: [
@@ -1564,7 +1502,7 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       body: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 200),
+        duration: const Duration(milliseconds: 300),
         child: KeyedSubtree(key: ValueKey(tab), child: pages[tab]),
       ),
       floatingActionButton: tab == 2
@@ -1605,12 +1543,12 @@ Widget statCard(BuildContext context, String label, int value, {Color? color}) {
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Column(
           children: [
-            CountUp(
-              value: value,
+            Text(
+              '$value',
               style: Theme.of(context)
                   .textTheme
                   .headlineSmall
-                  ?.copyWith(color: color ?? Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w900),
+                  ?.copyWith(color: color),
             ),
             Text(label, style: const TextStyle(fontSize: 12)),
           ],
@@ -1842,7 +1780,7 @@ class _BorrowTabState extends State<BorrowTab> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        const HeroBanner().animate().fadeIn(duration: 300.ms).slideY(begin: .05, end: 0, duration: 300.ms, curve: Curves.easeOut),
+        const HeroBanner(),
         const SizedBox(height: 12),
         Row(
           children: [
@@ -1969,8 +1907,7 @@ class _BorrowTabState extends State<BorrowTab> {
               controller: controller,
               focusNode: focusNode,
               decoration: const InputDecoration(
-                labelText: 'Book',
-                hintText: 'Type a title, or scan the book number',
+                labelText: 'Book (search by title, author, or scan the book number)',
                 prefixIcon: Icon(Icons.book),
                 border: OutlineInputBorder(),
               ),
@@ -2132,20 +2069,6 @@ class LogbookTab extends StatefulWidget {
 class _LogbookTabState extends State<LogbookTab> {
   String query = '';
   String status = 'All';
-  bool searching = false;
-  Timer? _timer;
-
-  void _onSearch(String v) {
-    setState(() {
-      query = v;
-      searching = v.trim().isNotEmpty;
-    });
-    _timer?.cancel();
-    _timer = Timer(const Duration(milliseconds: 350), () {
-      if (mounted) setState(() => searching = false);
-    });
-  }
-
 
   bool _matchStatus(LogEntry e) {
     switch (status) {
@@ -2207,11 +2130,11 @@ class _LogbookTabState extends State<LogbookTab> {
             children: [
               Expanded(
                 child: SmartSearch(
-                  hint: 'Search a book title or student name',
+                  hint: 'Search by book, name, or ID',
                   suggestions: [
                     for (final e in widget.logs) ...[e.book, e.student.name]
                   ],
-                  onChanged: _onSearch,
+                  onChanged: (v) => setState(() => query = v),
                 ),
               ),
               const SizedBox(width: 8),
@@ -2241,16 +2164,8 @@ class _LogbookTabState extends State<LogbookTab> {
           ),
         ),
         Expanded(
-          child: searching
-              ? const FakeList()
-              : shown.isEmpty
-              ? EmptyState(
-                  icon: Icons.menu_book_outlined,
-                  title: query.isEmpty ? 'No records yet' : 'No matches found',
-                  message: query.isEmpty
-                      ? 'Books you log on the Borrow tab will show up here.'
-                      : 'Check the spelling, or try fewer words.',
-                )
+          child: shown.isEmpty
+              ? const Center(child: Text('No records found.'))
               : ListView.builder(
                   itemCount: shown.length,
                   itemBuilder: (context, i) {
@@ -2299,9 +2214,6 @@ class _LogbookTabState extends State<LogbookTab> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Checkbox(
-                              visualDensity: VisualDensity.compact,
-                              materialTapTargetSize:
-                                  MaterialTapTargetSize.shrinkWrap,
                               value: e.returned,
                               onChanged: (v) =>
                                   widget.onReturned(e, v ?? false),
@@ -2311,7 +2223,7 @@ class _LogbookTabState extends State<LogbookTab> {
                           ],
                         ),
                       ),
-                    ).animate(delay: (30 * (i % 10)).ms).fadeIn(duration: 220.ms).slideY(begin: .04, end: 0, duration: 220.ms, curve: Curves.easeOut);
+                    ).animate().fadeIn(duration: 300.ms).slideY(begin: .05);
                   },
                 ),
         ),
@@ -2350,20 +2262,6 @@ class StudentsTab extends StatefulWidget {
 class _StudentsTabState extends State<StudentsTab> {
   String query = '';
   String levelFilter = 'All';
-  bool searching = false;
-  Timer? _timer;
-
-  void _onSearch(String v) {
-    setState(() {
-      query = v;
-      searching = v.trim().isNotEmpty;
-    });
-    _timer?.cancel();
-    _timer = Timer(const Duration(milliseconds: 350), () {
-      if (mounted) setState(() => searching = false);
-    });
-  }
-
 
   @override
   Widget build(BuildContext context) {
@@ -2374,25 +2272,15 @@ class _StudentsTabState extends State<StudentsTab> {
           0;
       return matchText && (levelFilter == 'All' || s.level == levelFilter);
     }).toList();
-    final order = appSettings.studentOrder;
-    String groupOf(Student s) => order == StudentOrder.level
-        ? s.level
-        : order == StudentOrder.program
-            ? (s.isCollege ? s.college : 'Senior High - ${s.strand}')
-            : '';
-    shown.sort((a, b) {
-      final c = groupOf(a).compareTo(groupOf(b));
-      return c != 0 ? c : a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
 
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.all(16),
           child: SmartSearch(
-            hint: 'Search by name or student ID',
+            hint: 'Search ${widget.students.length} student(s)',
             suggestions: [for (final s in widget.students) s.name],
-            onChanged: _onSearch,
+            onChanged: (v) => setState(() => query = v),
           ),
         ),
         SingleChildScrollView(
@@ -2413,24 +2301,14 @@ class _StudentsTabState extends State<StudentsTab> {
           ),
         ),
         Expanded(
-          child: searching
-              ? const FakeList()
-              : shown.isEmpty
-              ? EmptyState(
-                  icon: Icons.people_outline,
-                  title: query.isEmpty ? 'No students yet' : 'No matches found',
-                  message: query.isEmpty
-                      ? 'Tap Add student, or scan a new ID on the Borrow tab.'
-                      : 'Check the spelling, or try a student ID.',
-                )
+          child: shown.isEmpty
+              ? const Center(child: Text('No students found.'))
               : ListView.builder(
                   padding: const EdgeInsets.only(bottom: 88),
                   itemCount: shown.length,
                   itemBuilder: (context, i) {
                     final s = shown[i];
-                    final g = groupOf(s);
-                    final showHeader = i == 0 || groupOf(shown[i - 1]) != g;
-                    final tile = ListTile(
+                    return ListTile(
                       leading: CircleAvatar(
                           child: Text(s.name.isEmpty ? '?' : s.name[0])),
                       title: Text(s.name),
@@ -2452,26 +2330,6 @@ class _StudentsTabState extends State<StudentsTab> {
                         ],
                       ),
                     );
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (showHeader && g.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-                            child: Text(
-                              g,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleSmall
-                                  ?.copyWith(
-                                    color: Theme.of(context).colorScheme.primary,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                            ),
-                          ),
-                        tile,
-                      ],
-                    ).animate(delay: (30 * (i % 10)).ms).fadeIn(duration: 220.ms).slideY(begin: .04, end: 0, duration: 220.ms, curve: Curves.easeOut);
                   },
                 ),
         ),
@@ -2504,19 +2362,6 @@ class BooksTab extends StatefulWidget {
 
 class _BooksTabState extends State<BooksTab> {
   String query = '';
-  bool searching = false;
-  Timer? _timer;
-
-  void _onSearch(String v) {
-    setState(() {
-      query = v;
-      searching = v.trim().isNotEmpty;
-    });
-    _timer?.cancel();
-    _timer = Timer(const Duration(milliseconds: 350), () {
-      if (mounted) setState(() => searching = false);
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -2534,9 +2379,9 @@ class _BooksTabState extends State<BooksTab> {
             children: [
               Expanded(
                 child: SmartSearch(
-                  hint: 'Search by title, author, or book number',
+                  hint: 'Search ${widget.books.length} book(s)',
                   suggestions: [for (final b in widget.books) b.title],
-                  onChanged: _onSearch,
+                  onChanged: (v) => setState(() => query = v),
                 ),
               ),
               const SizedBox(width: 8),
@@ -2549,16 +2394,8 @@ class _BooksTabState extends State<BooksTab> {
           ),
         ),
         Expanded(
-          child: searching
-              ? const FakeList()
-              : shown.isEmpty
-              ? EmptyState(
-                  icon: Icons.library_books_outlined,
-                  title: query.isEmpty ? 'No books yet' : 'No matches found',
-                  message: query.isEmpty
-                      ? 'Tap Add book, or import a list from Excel.'
-                      : 'Check the spelling, or try the author name.',
-                )
+          child: shown.isEmpty
+              ? const Center(child: Text('No books yet. Add one or import from Excel.'))
               : ListView.builder(
                   padding: const EdgeInsets.only(bottom: 88),
                   itemCount: shown.length,
