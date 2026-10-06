@@ -40,7 +40,8 @@ final appSettings = AppSettings();
 
 // The menu that opens from the burger (3 lines) icon.
 class AppDrawer extends StatelessWidget {
-  const AppDrawer({super.key});
+  final List<Widget> extra;
+  const AppDrawer({super.key, this.extra = const []});
 
   @override
   Widget build(BuildContext context) {
@@ -54,6 +55,8 @@ class AppDrawer extends StatelessWidget {
                   style: TextStyle(fontWeight: FontWeight.w700)),
               subtitle: const Text('ICCT Taytay Satellite Campus'),
             ),
+            const Divider(),
+            ...extra,
             const Divider(),
             ListTile(
               leading: const Icon(Icons.settings_outlined),

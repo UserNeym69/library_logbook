@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'search.dart';
 import 'extras.dart';
-import 'pages.dart';
 import 'settings.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -214,7 +213,7 @@ String newId(String prefix) =>
     '${Random().nextInt(1 << 20).toRadixString(36)}';
 
 class Book {
-  final String id, title, author, bookNo, category;
+  final String id, title, author, bookNo;
   final int copies;
 
   const Book({
@@ -222,7 +221,6 @@ class Book {
     required this.title,
     this.author = '',
     this.bookNo = '',
-    this.category = '',
     this.copies = 1,
   });
 
@@ -232,7 +230,6 @@ class Book {
         'author': author,
         'bookNo': bookNo,
         'copies': copies,
-        'category': category,
       };
 
   factory Book.fromJson(Map<String, dynamic> j) => Book(
@@ -241,7 +238,6 @@ class Book {
         author: j['author'] as String? ?? '',
         bookNo: j['bookNo'] as String? ?? '',
         copies: (j['copies'] as num?)?.toInt() ?? 1,
-        category: j['category'] as String? ?? '',
       );
 }
 
@@ -343,7 +339,6 @@ List<Book> parseBooks(String text) {
       author: cells.length > 1 ? cells[1] : '',
       copies: copies,
       bookNo: cells.length > 3 ? cells[3] : '',
-      category: cells.length > 4 ? cells[4] : '',
     ));
   }
   return out;
@@ -857,7 +852,6 @@ Future<Book?> showBookDialog(BuildContext context, {Book? existing}) {
   final authorCtrl = TextEditingController(text: existing?.author ?? '');
   final noCtrl = TextEditingController(text: existing?.bookNo ?? '');
   final copiesCtrl = TextEditingController(text: '${existing?.copies ?? 1}');
-  String category = existing?.category ?? '';
   String? error;
 
   return showDialog<Book>(
@@ -893,17 +887,6 @@ Future<Book?> showBookDialog(BuildContext context, {Book? existing}) {
                     labelText: 'Book number / barcode (optional)',
                     border: OutlineInputBorder(),
                   ),
-                ),
-                const SizedBox(height: 12),
-                DropdownMenu<String>(
-                  expandedInsets: EdgeInsets.zero,
-                  initialSelection: category.isEmpty ? null : category,
-                  label: const Text('Category (subject or track)'),
-                  dropdownMenuEntries: [
-                    for (final c in bookCategories)
-                      DropdownMenuEntry(value: c, label: c),
-                  ],
-                  onSelected: (v) => category = v ?? '',
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -952,7 +935,6 @@ Future<Book?> showBookDialog(BuildContext context, {Book? existing}) {
                   author: authorCtrl.text.trim(),
                   bookNo: noCtrl.text.trim(),
                   copies: copies,
-                  category: category,
                 ),
               );
             },
@@ -987,7 +969,7 @@ Future<String?> showImportDialog(BuildContext context) {
               maxLines: 10,
               decoration: const InputDecoration(
                 border: OutlineInputBorder(),
-                hintText: 'Title, Author, Copies, Book number, Category',
+                hintText: 'Title, Author, Copies, Book number',
               ),
             ),
           ],
@@ -1248,11 +1230,6 @@ class _HomePageState extends State<HomePage> {
     } else {
       _loadLocal();
     }
-  }
-
-  void _open(Widget page) {
-    Navigator.pop(context);
-    Navigator.push(context, MaterialPageRoute(builder: (_) => page));
   }
 
   void _onSettings() {
@@ -1565,23 +1542,7 @@ class _HomePageState extends State<HomePage> {
     ];
 
     return Scaffold(
-      drawer: AppDrawer(extra: [
-        ListTile(
-          leading: const Icon(Icons.explore_outlined),
-          title: const Text('Explore books'),
-          onTap: () => _open(ExplorePage(books: books, logs: logs)),
-        ),
-        ListTile(
-          leading: const Icon(Icons.history),
-          title: const Text('Student history'),
-          onTap: () => _open(StudentHistoryPage(students: students, logs: logs)),
-        ),
-        ListTile(
-          leading: const Icon(Icons.insights_outlined),
-          title: const Text('Reports'),
-          onTap: () => _open(ReportsPage(books: books, logs: logs)),
-        ),
-      ]),
+      drawer: const AppDrawer(),
       appBar: AppBar(
         title: const BrandTitle(),
         actions: [
